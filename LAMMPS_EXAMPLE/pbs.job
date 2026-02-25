@@ -1,0 +1,15 @@
+#!/bin/sh
+#PBS -V
+#PBS -N grain_L_voids_500K
+#PBS -q workq
+#PBS -l select=1:ncpus=32:mpiprocs=32:ompthreads=1
+#PBS -l walltime=1200:00:00
+#PBS -A lammps
+
+cd $PBS_O_WORKDIR
+
+module purge
+module load intel19/compiler-19 intel19/openmpi-2.0.2
+export PATH=/home/park/Downloads/LAMMPS/lammps-2Aug2023/src:$PATH
+/usr/local/mpi/intel19/openmpi-2.0.2/bin/mpirun -np `cat $PBS_NODEFILE | wc -l` /home/park/Downloads/LAMMPS/lammps-2Aug2023/src/lmp_mpi -in grain_L_voids_500K.in
+exit

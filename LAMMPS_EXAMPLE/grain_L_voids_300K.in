@@ -1,0 +1,173 @@
+log         grain_L_voids_300K.log
+
+
+
+
+#Initialization-------------------------------------------------------
+
+units		metal
+dimension	3
+boundary	p p p  
+atom_style 	atomic
+
+# LATTICE SETUP-------------------------------------------------------
+
+variable Cu equal 3.615
+lattice fcc ${Cu}
+#Simulation box-------------------------------------------------------
+region          box block 0 10 0 10 0 10 units box
+create_box      1 box
+ 
+# Read polycrystal data-------------------------------------------------------
+pair_style      eam/alloy
+pair_coeff      * * Cu01.eam.alloy Cu
+ 
+read_data       initial_models/EM_grain_L_long.lmp add append 
+
+  
+
+reset_atoms     id sort yes
+ 
+
+region          vacancy_cluster1 sphere 50 50 50 25 side in units box
+region          vacancy_cluster2 sphere 150 50 50 25 side in units box
+region          vacancy_cluster3 sphere 250 50 50 25 side in units box
+region          vacancy_cluster4 sphere 350 50 50 25 side in units box
+region          vacancy_cluster5 sphere 450 50 50 25 side in units box
+
+
+#Define Potential--------------------------------------------------------
+pair_style      eam/alloy
+pair_coeff      * * Cu01.eam.alloy Cu
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes
+timestep        0.001
+# velocity all create 300 1596 dist gaussian
+
+
+shell   mkdir grain_L_voids_300K
+shell   cd grain_L_voids_300K
+shell   mkdir 1.NPT_relaxation
+shell   cd 1.NPT_relaxation
+# 온도 계산
+compute         myTemp all temp
+
+
+compute         cna all cna/atom 3.0856
+
+
+variable        fN_to_eVA equal 1.0/1602176
+variable        T equal temp
+
+variable        F_val equal 500*(500/300)
+
+variable        Fx_EM atom "((c_cna != 5) * v_F_val * v_fN_to_eVA) + ((c_cna == 5) * v_F_val*10 * v_fN_to_eVA)"
+
+variable        E_EM atom "-v_Fx_EM * x"
+
+
+
+# ------------------------------------------------------------------
+# 7. RUN SIMULATION
+# ------------------------------------------------------------------
+thermo		    1000
+thermo_style    custom step temp pe ke etotal press
+min_style           cg
+min_modify          dmax 0.1
+minimize            1.0e-6 1.0e-8 10000 10000
+
+
+
+
+write_dump      all custom 1.npt.dump.0 id type x y z
+
+
+reset_timestep 0
+
+
+compute             stress_atom all stress/atom NULL
+variable            stressxx atom c_stress_atom[1]
+variable            stressyy atom c_stress_atom[2]
+variable            stresszz atom c_stress_atom[3]
+variable            stressxy atom c_stress_atom[4]
+variable            stressxz atom c_stress_atom[5]
+variable            stressyz atom c_stress_atom[6]
+ 
+
+compute             pe all pe/atom
+
+
+dump                process0 all custom 10000 1.npt.dump.* id type x y z v_stressxx v_stressyy v_stresszz mass c_pe c_cna v_Fx_EM fx fy fz
+
+fix                 NPT1 all npt temp 300 300 0.1 x 0 0 1 y 0 0 1 z 0 0 1
+
+restart             10000  restart.1.npt.*.steps
+run                 100000
+undump process0
+unfix NPT1
+
+
+###########################################################
+reset_timestep      0  
+
+
+shell   mkdir ../2.NPT_relaxation
+shell   cd ../2.NPT_relaxation
+
+dump                process0 all custom 10000 2.nvt.dump.* id type x y z v_stressxx v_stressyy v_stresszz mass c_pe c_cna v_Fx_EM fx fy fz
+
+fix                 NVT1 all nvt temp 300 300 0.1
+
+restart             10000  restart.2.nvt.*.steps
+run                 100000
+undump process0
+unfix NVT1
+
+###############################################################
+
+reset_timestep      0  
+
+
+#Define groups--------------------------------------------------------
+change_box      all boundary s p p
+
+
+variable    x_min equal xlo
+variable    x_max equal xhi
+
+variable    low_boundary equal v_x_min+5.0
+variable    up_boundary  equal v_x_max-5.0
+
+region      r_lowfix block INF ${low_boundary} INF INF INF INF units box
+group       lowfix region r_lowfix
+
+region      r_upfix block ${up_boundary} INF INF INF INF INF units box
+group       upfix region r_upfix
+
+group  boundary_atoms union lowfix upfix
+group  mobile subtract all boundary_atoms
+
+
+fix                 boundary_f boundary_atoms setforce 0 0 0
+
+delete_atoms    region vacancy_cluster1
+delete_atoms    region vacancy_cluster2
+delete_atoms    region vacancy_cluster3
+delete_atoms    region vacancy_cluster4
+delete_atoms    region vacancy_cluster5
+
+shell   mkdir ../3.Electromigration
+shell   cd ../3.Electromigration
+
+dump                process0 all custom 10000 3.nvt.dump.* id type x y z v_stressxx v_stressyy v_stresszz mass c_pe c_cna v_Fx_EM fx fy fz
+
+fix             ems_force mobile addforce v_Fx_EM 0.0 0.0 energy v_E_EM
+fix                 NVT2 mobile nvt temp 300 300 0.1
+
+restart             10000  restart.3.nvt.*.steps
+run                 1000000
+
+undump process0
+unfix NVT2
+
