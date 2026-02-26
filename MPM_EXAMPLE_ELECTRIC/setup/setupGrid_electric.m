@@ -43,8 +43,7 @@ mesh.h     = h;                                                        % mesh si
 ngp    = mp^nD;                                                        % number of material points per element
 GpLoc  = detMpPos(mp,nD);                                              % local MP locations
 N      = shapefunc(nen,GpLoc,nD);                                      % basis functions for the material points
-[etplmp,coordmp] = formCoord2D(40,20,l,d);                             % mesh for MP generation
-coordmp(:,2)=coordmp(:,2)+(ly-d);                                      % adjust MP locations (vertical)
+[etplmp,coordmp] = formCoord2D(nelsx,nelsy,lx,ly);                     % mesh for MP generation (full domain)
 nelsmp = size(etplmp,1);                                               % no. elements populated with material points
 nmp    = ngp*nelsmp;                                                   % total number of material points
 
@@ -60,7 +59,7 @@ lp(:,1) = h(1)/(2*mp);                                                 % domain 
 lp(:,2) = h(2)/(2*mp);                                                 % domain half length y-direction
 vp      = 2^nD*lp(:,1).*lp(:,2);                                       % volume associated with each material point
 count =0;
-mid = [20,30];
+mid = [lx/2, ly/2];                                                    % hole center at domain center [21, 20]
 Z = zeros(nmp,1);
 %% Material point structure generation
 for mp = nmp:-1:1                                                      % loop backwards over MPs so array doesn't change size
