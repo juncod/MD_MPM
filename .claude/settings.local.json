@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tail:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.lammps.org)"
+    ]
+  }
+}

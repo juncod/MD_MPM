@@ -1,0 +1,65 @@
+# LAMMPS input script for electromigration coupling with MPM electric field solver
+# Cu grain boundary system with fix external callback
+#
+# Usage: mpirun -np 4 ../build/lammps_mpm_coupling [options] coupled_em.in
+#
+# This script:
+#   1. Creates Cu bicrystal with grain boundary
+#   2. Sets up EAM potential
+#   3. Defines CNA compute for structure identification
+#   4. Registers fix external for MPM force callback
+#   5. Runs NVT molecular dynamics
+
+# ─── Initialization ──────────────────────────────────────────────
+units           metal
+dimension       3
+boundary        p p p
+atom_style      atomic
+atom_modify     map array sort 0 0.0
+
+# ─── Lattice and geometry ────────────────────────────────────────
+# Cu FCC lattice constant: 3.615 Å
+lattice         fcc 3.615
+region          box block 0 20 0 20 0 20
+create_box      1 box
+create_atoms    1 box
+
+# ─── Interatomic potential ───────────────────────────────────────
+# EAM potential for Cu
+pair_style      eam
+pair_coeff      * * Cu_u3.eam
+mass            1 63.546
+
+# ─── Initial velocities ─────────────────────────────────────────
+velocity        all create 300.0 12345 dist gaussian
+
+# ─── Neighbor settings ──────────────────────────────────────────
+neighbor        2.0 bin
+neigh_modify    delay 5 every 1 check yes
+
+# ─── CNA compute for MPM coupling ───────────────────────────────
+# CNA values: 1=FCC, 2=HCP, 3=BCC, 4=ICO, 5=OTHER
+# For MPM coupling: CNA=1 (FCC) → bulk σ, CNA≠1 → defect σ
+compute         cna_mpm all cna/atom 3.615
+
+# ─── Fix external for MPM electric field ─────────────────────────
+# The callback "mpm_efield" is registered by the C driver via
+# lammps_set_fix_external_callback()
+fix             mpm_efield all external pf/callback 1 3
+
+# ─── Thermostat ──────────────────────────────────────────────────
+fix             nvt_fix all nvt temp 300.0 300.0 0.1
+
+# ─── Output ──────────────────────────────────────────────────────
+thermo_style    custom step temp pe ke etotal press vol
+thermo          100
+
+# Dump atom positions with CNA values
+dump            1 all custom 1000 dump.coupled_em.*.lammpstrj &
+                id type x y z c_cna_mpm fx fy fz
+
+# ─── Run ─────────────────────────────────────────────────────────
+# The actual run command is issued by the C driver via lammps_command("run N")
+# Do NOT put a run command here.
+# run 0 is needed to initialize the system before the driver takes over
+run             0
