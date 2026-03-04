@@ -1,6 +1,9 @@
 /*
- * mpm_solver.h — UMFPACK sparse direct solver wrapper
+ * mpm_solver.h — Preconditioned Conjugate Gradient sparse solver
  * Ported from: linSolve_Electric.m
+ *
+ * No external dependencies — pure C implementation.
+ * Uses diagonal (Jacobi) preconditioner for SPD systems.
  */
 #ifndef MPM_SOLVER_H
 #define MPM_SOLVER_H
@@ -10,13 +13,12 @@
 /* Initialize solver state for n DOFs */
 void solver_init(SolverState *solver, int n);
 
-/* Convert COO triplets to CSC format (summing duplicates) */
-void solver_coo_to_csc(SolverState *solver);
-
-/* Perform UMFPACK symbolic + numeric factorization */
-int solver_factorize(SolverState *solver);
+/* Convert COO triplets to CSR format (summing duplicates) */
+void solver_coo_to_csr(SolverState *solver);
 
 /* Solve the reduced system for free DOFs with Dirichlet BCs
+ * using Preconditioned Conjugate Gradient (diagonal preconditioner).
+ *
  * ddphi: potential increment (output, size n)
  * drct:  reaction currents (output, size n)
  * NRit:  Newton-Raphson iteration number (1-based)

@@ -77,8 +77,8 @@ int mpm_electric_solve(CouplingState *state)
 
     while ((fErr > tol && NRit < NRitMax) || NRit < 2) {
         /* Solve for potential increment */
-        /* Convert COO to CSC for UMFPACK */
-        solver_coo_to_csc(solver);
+        /* Convert COO to CSR for CG solver */
+        solver_coo_to_csr(solver);
 
         int ret = solver_solve(solver, mesh, ddphi, drct, NRit);
         if (ret != 0 && NRit > 0) {

@@ -10,8 +10,7 @@
  * Compile: cc -I../include -o test_solver test_solver.c \
  *          ../src/mpm_mesh.c ../src/mpm_basis.c ../src/mpm_assembly.c \
  *          ../src/mpm_solver.c ../src/mpm_electric.c ../src/atom_to_mp.c \
- *          -lumfpack -lamd -lcholmod -lcolamd -lcamd -lccolamd \
- *          -lsuitesparseconfig -lm
+ *          ../src/vtk_output.c -lm
  * Run:     ./test_solver
  */
 #include <stdio.h>

@@ -1,0 +1,117 @@
+log         grain_L_voids_500K_coupled.log
+
+# ================================================================
+# Grain boundary electromigration with MPM electric field coupling
+# Based on: LAMMPS_EXAMPLE/grain_L_voids_500K.in
+#
+# All coupling parameters are defined here as LAMMPS variables.
+# The C driver reads these via lammps_extract_variable().
+# ================================================================
+
+# === MPM COUPLING PARAMETERS (C driver reads these) ===============
+variable        voltage_left   equal 0.0       # Dirichlet BC: phi at x_min (V)
+variable        voltage_right  equal 1.0       # Dirichlet BC: phi at x_max (V)
+variable        sigma_bulk     equal 1.0       # conductivity for FCC bulk (CNA=1)
+variable        sigma_defect   equal 0.1       # conductivity for defects (CNA!=1)
+variable        atom_charge    equal 5.2e-6    # F = q*E (eV/A units)
+variable        target_h       equal 10.0      # target mesh element edge (Angstrom)
+variable        run_steps      equal 1000000   # total MD steps
+variable        vtk_freq       equal 10000     # VTK output frequency (0=disabled)
+# ==================================================================
+
+# Initialization ---------------------------------------------------
+units           metal
+dimension       3
+boundary        s p p
+atom_style      atomic
+atom_modify     map array sort 0 0.0
+
+# Read initial polycrystal model -----------------------------------
+read_data       ../../LAMMPS_EXAMPLE/initial_models/EM_grain_L_long.lmp
+
+variable        Cu equal 3.615
+lattice         fcc ${Cu}
+
+# Potential --------------------------------------------------------
+pair_style      eam/alloy
+pair_coeff      * * ../../LAMMPS_EXAMPLE/Cu01.eam.alloy Cu
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes
+timestep        0.001
+
+# Output directory -------------------------------------------------
+shell           mkdir -p output
+
+# Computes ---------------------------------------------------------
+compute         myTemp all temp
+compute         cna_mpm all cna/atom 3.0856
+compute         stress_atom all stress/atom NULL
+compute         pe all pe/atom
+
+variable        stressxx atom c_stress_atom[1]
+variable        stressyy atom c_stress_atom[2]
+variable        stresszz atom c_stress_atom[3]
+variable        stressxy atom c_stress_atom[4]
+variable        stressxz atom c_stress_atom[5]
+variable        stressyz atom c_stress_atom[6]
+
+# Void regions (same as original) ----------------------------------
+region          vacancy_cluster1 sphere 50 50 50 25 side in units box
+region          vacancy_cluster2 sphere 150 50 50 25 side in units box
+region          vacancy_cluster3 sphere 250 50 50 25 side in units box
+region          vacancy_cluster4 sphere 350 50 50 25 side in units box
+region          vacancy_cluster5 sphere 450 50 50 25 side in units box
+
+# Boundary groups --------------------------------------------------
+reset_timestep  0
+
+variable        x_min equal xlo
+variable        x_max equal xhi
+variable        low_boundary equal v_x_min+5.0
+variable        up_boundary  equal v_x_max-5.0
+
+region          r_lowfix block INF ${low_boundary} INF INF INF INF units box
+group           lowfix region r_lowfix
+
+region          r_upfix block ${up_boundary} INF INF INF INF INF units box
+group           upfix region r_upfix
+
+group           boundary_atoms union lowfix upfix
+group           mobile subtract all boundary_atoms
+
+fix             boundary_f boundary_atoms setforce 0 0 0
+
+# Delete void atoms ------------------------------------------------
+delete_atoms    region vacancy_cluster1
+delete_atoms    region vacancy_cluster2
+delete_atoms    region vacancy_cluster3
+delete_atoms    region vacancy_cluster4
+delete_atoms    region vacancy_cluster5
+
+# === MPM ELECTRIC FIELD FIX =======================================
+# pf/callback Nevery Ndim
+#   Nevery = 100 → callback invoked every 100 steps (MPM solve frequency)
+#   Ndim = 3 → 3D force vector (fx, fy, fz)
+#
+# Replaces original:
+#   fix ems_force mobile addforce v_Fx_EM 0.0 0.0 energy v_E_EM
+# ==================================================================
+fix             mpm_efield mobile external pf/callback 100 3
+
+# Thermostat -------------------------------------------------------
+fix             NVT2 mobile nvt temp 500 500 0.1
+
+# Output -----------------------------------------------------------
+thermo          1000
+thermo_style    custom step temp pe ke etotal press
+
+dump            process0 all custom 10000 output/dump.coupled.* &
+                id type x y z v_stressxx v_stressyy v_stresszz &
+                mass c_pe c_cna_mpm fx fy fz
+
+restart         10000 output/restart.coupled.*.steps
+
+# Initialize system for callback registration
+# C driver intercepts here, registers callback, then issues "run"
+run             0

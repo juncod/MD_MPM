@@ -19,10 +19,10 @@ typedef struct {
     double voltage_left;            /* Dirichlet BC at x=x0           */
     double voltage_right;           /* Dirichlet BC at x=x0+lx        */
     double atom_charge;             /* F = q*E charge parameter        */
-    int    coupling_interval;       /* MPM solve every N MD steps      */
     int    nr_max_iter;             /* Newton-Raphson max iterations    */
     double nr_tolerance;            /* NR convergence tolerance         */
     double x0, y0, z0;             /* domain origin                    */
+    double target_h;                /* target element edge length (Å)   */
     int    mp_per_dir;              /* material points per element dir  */
     int    mp_type;                 /* 1=MPM, 2=GIMP                   */
 } MPMConfig;
@@ -75,7 +75,7 @@ typedef struct {
 } MPData;
 
 /* ---------------------------------------------------------------------------
- * Sparse Solver State (COO → CSC + UMFPACK)
+ * Sparse Solver State (COO → CSR + Conjugate Gradient)
  * -------------------------------------------------------------------------*/
 typedef struct {
     int    n;                       /* matrix dimension (nnodes) */
@@ -85,14 +85,14 @@ typedef struct {
     int    *coo_row;
     int    *coo_col;
     double *coo_val;
-    /* CSC format (for UMFPACK) */
+    /* CSR format (for CG solver) */
     int    nnz;
-    int    *Ap;                     /* column pointers [n+1] */
-    int    *Ai;                     /* row indices [nnz] */
+    int    *Ap;                     /* row pointers [n+1] */
+    int    *Aj;                     /* column indices [nnz] */
     double *Ax;                     /* values [nnz] */
-    /* UMFPACK handles */
-    void   *Symbolic;
-    void   *Numeric;
+    /* CG solver parameters */
+    int    cg_max_iter;             /* max CG iterations (default: 2*n) */
+    double cg_tolerance;            /* CG convergence tolerance */
     /* Vectors */
     double *phi;                    /* solution vector [n] */
     double *rhs;                    /* right-hand side [n] */
@@ -114,10 +114,9 @@ typedef struct {
     Mesh        mesh;
     MPData      mpdata;
     SolverState solver;
-    double      *prev_forces;       /* 3*natoms — cached forces between solves */
+    double      *prev_forces;       /* reserved for future caching */
     int         prev_forces_size;
     void        *lmp;               /* LAMMPS handle */
-    int         step_counter;       /* steps since last solve */
     int         initialized;        /* mesh+solver initialized? */
 } CouplingState;
 

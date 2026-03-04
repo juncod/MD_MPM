@@ -1,16 +1,18 @@
 /*
- * mpm_solver.c — UMFPACK sparse direct solver wrapper
+ * mpm_solver.c — Preconditioned Conjugate Gradient sparse solver
  * Ported from: linSolve_Electric.m
  *
- * Uses SuiteSparse UMFPACK for sparse LU factorization.
- * Dirichlet BCs applied by extracting the free-DOF sub-system.
+ * Replaces UMFPACK with a pure-C PCG implementation.
+ * K matrix is SPD for -div(σ∇φ)=0 → CG is guaranteed to converge.
+ * Diagonal (Jacobi) preconditioner: M = diag(K).
+ *
+ * No external dependencies — only requires <math.h>.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "mpm_solver.h"
-#include <umfpack.h>
 
 /* --------------------------------------------------------------------------
  * Initialize solver state
@@ -33,81 +35,270 @@ void solver_init(SolverState *solver, int n)
     solver->coo_row = (int *)mpm_calloc(solver->coo_capacity, sizeof(int));
     solver->coo_col = (int *)mpm_calloc(solver->coo_capacity, sizeof(int));
     solver->coo_val = (double *)mpm_calloc(solver->coo_capacity, sizeof(double));
+
+    /* CG defaults */
+    solver->cg_max_iter = 0;   /* 0 = auto (2*nfree) */
+    solver->cg_tolerance = 1e-12;
 }
 
 /* --------------------------------------------------------------------------
- * Convert COO to CSC format using UMFPACK triplet_to_col
+ * COO → CSR conversion (sum duplicates)
+ *
+ * Algorithm:
+ *   1. Count entries per row
+ *   2. Build row pointers (prefix sum)
+ *   3. Scatter entries into CSR arrays
+ *   4. Sort each row by column index
+ *   5. Merge duplicate (row,col) entries by summing values
  * --------------------------------------------------------------------------*/
-void solver_coo_to_csc(SolverState *solver)
+
+/* Sort column indices within a row (insertion sort — rows are small) */
+static void sort_row(int *cols, double *vals, int len)
 {
-    int n = solver->n;
+    for (int i = 1; i < len; i++) {
+        int    tc = cols[i];
+        double tv = vals[i];
+        int j = i - 1;
+        while (j >= 0 && cols[j] > tc) {
+            cols[j + 1] = cols[j];
+            vals[j + 1] = vals[j];
+            j--;
+        }
+        cols[j + 1] = tc;
+        vals[j + 1] = tv;
+    }
+}
+
+void solver_coo_to_csr(SolverState *solver)
+{
+    int n  = solver->n;
     int nz = solver->coo_nnz;
 
-    /* Free old CSC */
-    free(solver->Ap);
-    free(solver->Ai);
-    free(solver->Ax);
+    /* Free old CSR */
+    free(solver->Ap); solver->Ap = NULL;
+    free(solver->Aj); solver->Aj = NULL;
+    free(solver->Ax); solver->Ax = NULL;
+    solver->nnz = 0;
 
     if (nz == 0) {
-        solver->nnz = 0;
         solver->Ap = (int *)mpm_calloc(n + 1, sizeof(int));
-        solver->Ai = NULL;
-        solver->Ax = NULL;
         return;
     }
 
-    /* Allocate CSC arrays (max size = nz, may be smaller after summing) */
-    solver->Ap = (int *)mpm_calloc(n + 1, sizeof(int));
-    solver->Ai = (int *)mpm_calloc(nz, sizeof(int));
-    solver->Ax = (double *)mpm_calloc(nz, sizeof(double));
-
-    int status = umfpack_di_triplet_to_col(
-        n, n, nz,
-        solver->coo_row, solver->coo_col, solver->coo_val,
-        solver->Ap, solver->Ai, solver->Ax, NULL);
-
-    if (status != UMFPACK_OK) {
-        fprintf(stderr, "umfpack_di_triplet_to_col failed: %d\n", status);
-        return;
+    /* Step 1: count entries per row */
+    int *row_count = (int *)mpm_calloc(n, sizeof(int));
+    for (int k = 0; k < nz; k++) {
+        row_count[solver->coo_row[k]]++;
     }
 
-    solver->nnz = solver->Ap[n];
+    /* Step 2: build row pointers */
+    int *Ap = (int *)mpm_calloc(n + 1, sizeof(int));
+    for (int i = 0; i < n; i++) {
+        Ap[i + 1] = Ap[i] + row_count[i];
+    }
+
+    /* Step 3: scatter COO into CSR (unsorted, with duplicates) */
+    int *Aj = (int *)mpm_calloc(nz, sizeof(int));
+    double *Ax = (double *)mpm_calloc(nz, sizeof(double));
+    int *cursor = (int *)mpm_calloc(n, sizeof(int));
+    memcpy(cursor, Ap, n * sizeof(int));
+
+    for (int k = 0; k < nz; k++) {
+        int r = solver->coo_row[k];
+        int pos = cursor[r]++;
+        Aj[pos] = solver->coo_col[k];
+        Ax[pos] = solver->coo_val[k];
+    }
+    free(cursor);
+    free(row_count);
+
+    /* Step 4: sort each row by column index */
+    for (int i = 0; i < n; i++) {
+        int start = Ap[i], len = Ap[i + 1] - Ap[i];
+        if (len > 1) {
+            sort_row(&Aj[start], &Ax[start], len);
+        }
+    }
+
+    /* Step 5: merge duplicates within each row */
+    int new_nnz = 0;
+    int *Ap_new = (int *)mpm_calloc(n + 1, sizeof(int));
+    /* In-place compaction */
+    for (int i = 0; i < n; i++) {
+        int start = Ap[i], end = Ap[i + 1];
+        Ap_new[i] = new_nnz;
+        for (int k = start; k < end; ) {
+            int col = Aj[k];
+            double sum = 0.0;
+            while (k < end && Aj[k] == col) {
+                sum += Ax[k];
+                k++;
+            }
+            Aj[new_nnz] = col;
+            Ax[new_nnz] = sum;
+            new_nnz++;
+        }
+    }
+    Ap_new[n] = new_nnz;
+
+    free(Ap);
+    solver->Ap  = Ap_new;
+    solver->Aj  = Aj;
+    solver->Ax  = Ax;
+    solver->nnz = new_nnz;
 }
 
 /* --------------------------------------------------------------------------
- * UMFPACK factorize
+ * CSR matrix-vector multiply: y = A * x  (full matrix)
  * --------------------------------------------------------------------------*/
-int solver_factorize(SolverState *solver)
+static void csr_matvec(const int *Ap, const int *Aj, const double *Ax,
+                       int n, const double *x, double *y)
 {
-    int n = solver->n;
-
-    /* Free old factorizations */
-    if (solver->Symbolic) {
-        umfpack_di_free_symbolic(&solver->Symbolic);
-        solver->Symbolic = NULL;
+    for (int i = 0; i < n; i++) {
+        double s = 0.0;
+        for (int k = Ap[i]; k < Ap[i + 1]; k++) {
+            s += Ax[k] * x[Aj[k]];
+        }
+        y[i] = s;
     }
-    if (solver->Numeric) {
-        umfpack_di_free_numeric(&solver->Numeric);
-        solver->Numeric = NULL;
+}
+
+/* --------------------------------------------------------------------------
+ * Reduced CSR matvec: y = A(fd,fd) * x
+ * perm[full_idx] = reduced_idx or -1
+ * Only touches rows/cols in the free DOF set.
+ * --------------------------------------------------------------------------*/
+static void csr_matvec_reduced(const int *Ap, const int *Aj, const double *Ax,
+                               int n_full, const int *perm,
+                               int n_red, const double *x_red, double *y_red)
+{
+    /* Zero output */
+    memset(y_red, 0, n_red * sizeof(double));
+
+    for (int i = 0; i < n_full; i++) {
+        int ri = perm[i];
+        if (ri < 0) continue;
+        double s = 0.0;
+        for (int k = Ap[i]; k < Ap[i + 1]; k++) {
+            int rj = perm[Aj[k]];
+            if (rj >= 0) {
+                s += Ax[k] * x_red[rj];
+            }
+        }
+        y_red[ri] = s;
+    }
+}
+
+/* --------------------------------------------------------------------------
+ * Preconditioned Conjugate Gradient (Jacobi/diagonal preconditioner)
+ *
+ * Solves A_red * x = b for the free-DOF sub-system.
+ * M^{-1} = 1/diag(A_red)
+ *
+ * Returns number of iterations (negative on failure).
+ * --------------------------------------------------------------------------*/
+static int pcg_solve_reduced(const int *Ap, const int *Aj, const double *Ax,
+                             int n_full, const int *perm, const int *free_dofs,
+                             int nfree, const double *b, double *x,
+                             int max_iter, double tol)
+{
+    if (nfree == 0) return 0;
+
+    /* Allocate CG work vectors */
+    double *r  = (double *)mpm_calloc(nfree, sizeof(double));
+    double *z  = (double *)mpm_calloc(nfree, sizeof(double));
+    double *p  = (double *)mpm_calloc(nfree, sizeof(double));
+    double *Ap_vec = (double *)mpm_calloc(nfree, sizeof(double));
+    double *M_inv  = (double *)mpm_calloc(nfree, sizeof(double));
+
+    /* Build diagonal preconditioner: M_inv[i] = 1 / A(fd[i], fd[i]) */
+    for (int ii = 0; ii < nfree; ii++) {
+        int i = free_dofs[ii];
+        double diag = 0.0;
+        for (int k = Ap[i]; k < Ap[i + 1]; k++) {
+            if (Aj[k] == i) {
+                diag = Ax[k];
+                break;
+            }
+        }
+        M_inv[ii] = (fabs(diag) > 1e-30) ? 1.0 / diag : 1.0;
     }
 
-    int status = umfpack_di_symbolic(n, n,
-        solver->Ap, solver->Ai, solver->Ax,
-        &solver->Symbolic, NULL, NULL);
-    if (status != UMFPACK_OK) {
-        fprintf(stderr, "umfpack_di_symbolic failed: %d\n", status);
-        return -1;
+    /* r = b - A*x (initial residual) */
+    csr_matvec_reduced(Ap, Aj, Ax, n_full, perm, nfree, x, Ap_vec);
+    for (int i = 0; i < nfree; i++) {
+        r[i] = b[i] - Ap_vec[i];
     }
 
-    status = umfpack_di_numeric(
-        solver->Ap, solver->Ai, solver->Ax,
-        solver->Symbolic, &solver->Numeric, NULL, NULL);
-    if (status != UMFPACK_OK) {
-        fprintf(stderr, "umfpack_di_numeric failed: %d\n", status);
-        return -1;
+    /* z = M^{-1} * r */
+    double rz = 0.0;
+    for (int i = 0; i < nfree; i++) {
+        z[i] = M_inv[i] * r[i];
+        rz += r[i] * z[i];
     }
 
-    return 0;
+    /* p = z */
+    memcpy(p, z, nfree * sizeof(double));
+
+    /* Compute initial residual norm for convergence check */
+    double b_norm = 0.0;
+    for (int i = 0; i < nfree; i++) b_norm += b[i] * b[i];
+    b_norm = sqrt(b_norm);
+    if (b_norm < 1e-30) b_norm = 1.0;
+
+    double r_norm = 0.0;
+    for (int i = 0; i < nfree; i++) r_norm += r[i] * r[i];
+    r_norm = sqrt(r_norm);
+
+    int iter;
+    for (iter = 0; iter < max_iter; iter++) {
+        if (r_norm / b_norm < tol) break;
+
+        /* Ap_vec = A * p */
+        csr_matvec_reduced(Ap, Aj, Ax, n_full, perm, nfree, p, Ap_vec);
+
+        /* alpha = rz / (p' * Ap) */
+        double pAp = 0.0;
+        for (int i = 0; i < nfree; i++) pAp += p[i] * Ap_vec[i];
+
+        if (fabs(pAp) < 1e-30) {
+            /* Breakdown — matrix may be singular in this subspace */
+            break;
+        }
+        double alpha = rz / pAp;
+
+        /* x = x + alpha * p */
+        /* r = r - alpha * Ap */
+        for (int i = 0; i < nfree; i++) {
+            x[i] += alpha * p[i];
+            r[i] -= alpha * Ap_vec[i];
+        }
+
+        /* Recompute residual norm */
+        r_norm = 0.0;
+        for (int i = 0; i < nfree; i++) r_norm += r[i] * r[i];
+        r_norm = sqrt(r_norm);
+
+        /* z = M^{-1} * r */
+        double rz_new = 0.0;
+        for (int i = 0; i < nfree; i++) {
+            z[i] = M_inv[i] * r[i];
+            rz_new += r[i] * z[i];
+        }
+
+        /* beta = rz_new / rz */
+        double beta = rz_new / (rz + 1e-30);
+        rz = rz_new;
+
+        /* p = z + beta * p */
+        for (int i = 0; i < nfree; i++) {
+            p[i] = z[i] + beta * p[i];
+        }
+    }
+
+    free(r); free(z); free(p); free(Ap_vec); free(M_inv);
+
+    return (r_norm / b_norm < tol) ? iter : -(iter + 1);
 }
 
 /* --------------------------------------------------------------------------
@@ -131,36 +322,14 @@ int solver_solve(SolverState *solver, const Mesh *mesh,
     /* Apply Dirichlet BCs at NRit=1 */
     if (NRit == 1) {
         for (int i = 0; i < mesh->nbc; i++) {
-            ddphi[mesh->bc_node[i]] = 2.0 * mesh->bc_val[i];
-            /* Factor of 2 matches MATLAB: (1+sign(1-NRit))*fixedValues = 2*vals at NRit=1 */
+            ddphi[mesh->bc_node[i]] = mesh->bc_val[i];
+            /* MATLAB: (1+sign(1-NRit))*vals = 1*vals at NRit=1 */
         }
     }
-    /* At NRit>1, ddphi at fixed nodes stays 0 (already converged) */
 
     int nfree = solver->nfree;
     if (nfree == 0) return 0;
 
-    /* Build reduced RHS: b_free = oobf(fd) - Ke(fd, fixedNodes) * ddphi(fixedNodes)
-     * oobf is stored in solver->rhs
-     * We need to compute K * ddphi for the fixed nodes contribution */
-
-    /* First, compute K * ddphi (full vector) — only nonzero for fixed nodes */
-    double *Kd = (double *)mpm_calloc(n, sizeof(double));
-    /* CSC multiply: for each column j, add Ax[k]*ddphi[j] to Kd[Ai[k]] */
-    for (int j = 0; j < n; j++) {
-        if (ddphi[j] == 0.0) continue;
-        for (int k = solver->Ap[j]; k < solver->Ap[j + 1]; k++) {
-            Kd[solver->Ai[k]] += solver->Ax[k] * ddphi[j];
-        }
-    }
-
-    /* Reduced RHS: b(fd) = oobf(fd) - Kd(fd) */
-    double *b_red = (double *)mpm_calloc(nfree, sizeof(double));
-    for (int i = 0; i < nfree; i++) {
-        b_red[i] = solver->rhs[solver->free_dofs[i]] - Kd[solver->free_dofs[i]];
-    }
-
-    /* Extract reduced K matrix (free DOFs only) in CSC format */
     /* Build permutation: perm[full_idx] = reduced_idx or -1 */
     int *perm = solver->perm;
     memset(perm, -1, n * sizeof(int));
@@ -168,59 +337,32 @@ int solver_solve(SolverState *solver, const Mesh *mesh,
         perm[solver->free_dofs[i]] = i;
     }
 
-    /* Count non-zeros in reduced matrix */
-    int nnz_red = 0;
-    for (int j = 0; j < n; j++) {
-        if (perm[j] < 0) continue;
-        for (int k = solver->Ap[j]; k < solver->Ap[j + 1]; k++) {
-            if (perm[solver->Ai[k]] >= 0) nnz_red++;
-        }
-    }
+    /* Compute K * ddphi_fixed (contribution from Dirichlet nodes) */
+    double *Kd = (double *)mpm_calloc(n, sizeof(double));
+    csr_matvec(solver->Ap, solver->Aj, solver->Ax, n, ddphi, Kd);
 
-    int *Ap_red = (int *)mpm_calloc(nfree + 1, sizeof(int));
-    int *Ai_red = (int *)mpm_calloc(nnz_red, sizeof(int));
-    double *Ax_red = (double *)mpm_calloc(nnz_red, sizeof(double));
-
-    /* Fill reduced CSC */
-    int ptr = 0;
-    for (int jj = 0; jj < nfree; jj++) {
-        int j = solver->free_dofs[jj];
-        Ap_red[jj] = ptr;
-        for (int k = solver->Ap[j]; k < solver->Ap[j + 1]; k++) {
-            int ri = perm[solver->Ai[k]];
-            if (ri >= 0) {
-                Ai_red[ptr] = ri;
-                Ax_red[ptr] = solver->Ax[k];
-                ptr++;
-            }
-        }
-    }
-    Ap_red[nfree] = ptr;
-
-    /* Solve reduced system with UMFPACK */
-    void *Sym_red = NULL, *Num_red = NULL;
+    /* Reduced RHS: b(fd) = oobf(fd) - Kd(fd) */
+    double *b_red = (double *)mpm_calloc(nfree, sizeof(double));
     double *x_red = (double *)mpm_calloc(nfree, sizeof(double));
-    int status;
 
-    status = umfpack_di_symbolic(nfree, nfree, Ap_red, Ai_red, Ax_red,
-                                 &Sym_red, NULL, NULL);
-    if (status != UMFPACK_OK) {
-        fprintf(stderr, "solver_solve: symbolic failed (%d)\n", status);
-        goto cleanup;
+    for (int i = 0; i < nfree; i++) {
+        b_red[i] = solver->rhs[solver->free_dofs[i]] - Kd[solver->free_dofs[i]];
+        x_red[i] = 0.0;  /* initial guess = 0 */
     }
 
-    status = umfpack_di_numeric(Ap_red, Ai_red, Ax_red,
-                                Sym_red, &Num_red, NULL, NULL);
-    if (status != UMFPACK_OK) {
-        fprintf(stderr, "solver_solve: numeric failed (%d)\n", status);
-        goto cleanup;
-    }
+    /* Solve with PCG */
+    int max_iter = solver->cg_max_iter > 0 ? solver->cg_max_iter : 2 * nfree;
+    double tol = solver->cg_tolerance;
 
-    status = umfpack_di_solve(UMFPACK_A, Ap_red, Ai_red, Ax_red,
-                              x_red, b_red, Num_red, NULL, NULL);
-    if (status != UMFPACK_OK) {
-        fprintf(stderr, "solver_solve: solve failed (%d)\n", status);
-        goto cleanup;
+    int cg_iters = pcg_solve_reduced(
+        solver->Ap, solver->Aj, solver->Ax,
+        n, perm, solver->free_dofs, nfree,
+        b_red, x_red, max_iter, tol);
+
+    if (cg_iters < 0) {
+        fprintf(stderr, "solver_solve: CG did not converge in %d iterations\n",
+                -cg_iters);
+        /* Continue with best approximation — don't fail hard */
     }
 
     /* Scatter solution back to full ddphi */
@@ -229,26 +371,19 @@ int solver_solve(SolverState *solver, const Mesh *mesh,
     }
 
     /* Compute reaction currents: drct(fixedNodes) = K * ddphi - oobf */
-    /* Recompute K * ddphi with the full solution */
     memset(Kd, 0, n * sizeof(double));
-    for (int j = 0; j < n; j++) {
-        if (ddphi[j] == 0.0) continue;
-        for (int k = solver->Ap[j]; k < solver->Ap[j + 1]; k++) {
-            Kd[solver->Ai[k]] += solver->Ax[k] * ddphi[j];
-        }
-    }
+    csr_matvec(solver->Ap, solver->Aj, solver->Ax, n, ddphi, Kd);
+
     for (int i = 0; i < mesh->nbc; i++) {
         int node = mesh->bc_node[i];
         drct[node] = Kd[node] - solver->rhs[node];
     }
 
-cleanup:
-    umfpack_di_free_symbolic(&Sym_red);
-    umfpack_di_free_numeric(&Num_red);
-    free(Ap_red); free(Ai_red); free(Ax_red);
-    free(x_red); free(b_red); free(Kd);
+    free(Kd);
+    free(b_red);
+    free(x_red);
 
-    return (status == UMFPACK_OK) ? 0 : -1;
+    return 0;
 }
 
 /* --------------------------------------------------------------------------
@@ -275,8 +410,6 @@ void solver_free(SolverState *solver)
     free(solver->coo_col);   solver->coo_col   = NULL;
     free(solver->coo_val);   solver->coo_val   = NULL;
     free(solver->Ap);        solver->Ap        = NULL;
-    free(solver->Ai);        solver->Ai        = NULL;
+    free(solver->Aj);        solver->Aj        = NULL;
     free(solver->Ax);        solver->Ax        = NULL;
-    if (solver->Symbolic) umfpack_di_free_symbolic(&solver->Symbolic);
-    if (solver->Numeric)  umfpack_di_free_numeric(&solver->Numeric);
 }

@@ -2,8 +2,8 @@
 #
 # Dependencies:
 #   - LAMMPS (shared library): set LAMMPS_DIR
-#   - SuiteSparse (UMFPACK): set SUITESPARSE_DIR
 #   - MPI: mpicc
+#   - No external solver library needed (built-in CG solver)
 #
 # Usage:
 #   make all          — build main executable
@@ -14,31 +14,24 @@
 #   make clean        — remove build artifacts
 
 # ─── Paths (adjust for your system) ───────────────────────────────
-LAMMPS_DIR      ?= /usr/local
-SUITESPARSE_DIR ?= /usr/local
+LAMMPS_DIR ?= /usr/local
 
 # ─── Compilers ────────────────────────────────────────────────────
 CC      = mpicc
 CFLAGS  = -Wall -O2 -std=c99
 LDFLAGS =
 
-# Test compiler (no MPI needed for mesh/basis tests)
+# Test compiler (no MPI needed for unit tests)
 TCC     = cc
 TCFLAGS = -Wall -O2 -std=c99
 
 # ─── Include / Library paths ─────────────────────────────────────
 INCLUDES = -I./include \
-           -I$(LAMMPS_DIR)/include \
-           -I$(SUITESPARSE_DIR)/include \
-           -I$(SUITESPARSE_DIR)/include/suitesparse
-
-LIBS_UMFPACK = -L$(SUITESPARSE_DIR)/lib \
-               -lumfpack -lamd -lcholmod -lcolamd -lcamd -lccolamd \
-               -lsuitesparseconfig
+           -I$(LAMMPS_DIR)/include
 
 LIBS_LAMMPS = -L$(LAMMPS_DIR)/lib -llammps
 
-LIBS = $(LIBS_UMFPACK) $(LIBS_LAMMPS) -lm
+LIBS = $(LIBS_LAMMPS) -lm
 
 # ─── Sources ─────────────────────────────────────────────────────
 SRC_DIR   = src
@@ -81,26 +74,26 @@ $(TARGET): $(SRCS) $(HEADERS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $(BUILD_DIR)/$(TARGET) $(SRCS) $(LDFLAGS) $(LIBS)
 	@echo "Built: $(BUILD_DIR)/$(TARGET)"
 
-# ─── Unit Tests ──────────────────────────────────────────────────
+# ─── Unit Tests (no external dependencies except -lm) ────────────
 
-# Mesh test (no UMFPACK, no MPI, no LAMMPS)
+# Mesh test
 test_mesh: dirs $(TEST_DIR)/test_mesh.c $(SRC_DIR)/mpm_mesh.c $(HEADERS)
 	$(TCC) $(TCFLAGS) -I./include -o $(BUILD_DIR)/test_mesh \
 		$(TEST_DIR)/test_mesh.c $(SRC_DIR)/mpm_mesh.c -lm
 	@echo "Running mesh tests..."
 	$(BUILD_DIR)/test_mesh
 
-# Basis test (no UMFPACK, no MPI, no LAMMPS)
+# Basis test
 test_basis: dirs $(TEST_DIR)/test_basis.c $(SRC_DIR)/mpm_basis.c $(SRC_DIR)/mpm_mesh.c $(HEADERS)
 	$(TCC) $(TCFLAGS) -I./include -o $(BUILD_DIR)/test_basis \
 		$(TEST_DIR)/test_basis.c $(SRC_DIR)/mpm_basis.c $(SRC_DIR)/mpm_mesh.c -lm
 	@echo "Running basis tests..."
 	$(BUILD_DIR)/test_basis
 
-# Solver test (needs UMFPACK, no MPI/LAMMPS)
+# Solver integration test (no external libs needed — pure C CG solver)
 test_solver: dirs $(TEST_DIR)/test_solver.c $(SRCS_CORE) $(HEADERS)
-	$(TCC) $(TCFLAGS) -I./include $(INCLUDES) -o $(BUILD_DIR)/test_solver \
-		$(TEST_DIR)/test_solver.c $(SRCS_CORE) $(LIBS_UMFPACK) -lm
+	$(TCC) $(TCFLAGS) -I./include -o $(BUILD_DIR)/test_solver \
+		$(TEST_DIR)/test_solver.c $(SRCS_CORE) -lm
 	@echo "Running solver tests..."
 	$(BUILD_DIR)/test_solver
 

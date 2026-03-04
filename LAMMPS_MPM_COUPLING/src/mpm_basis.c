@@ -114,9 +114,9 @@ int elem_for_pos(const Mesh *mesh, const MPMConfig *cfg, const double pos[3])
     int nx = cfg->nelsx, ny = cfg->nelsy, nz = cfg->nelsz;
     double x0 = cfg->x0, y0 = cfg->y0, z0 = cfg->z0;
 
-    int ix = (int)((pos[0] - x0) / mesh->h[0]);
-    int iy = (int)((pos[1] - y0) / mesh->h[1]);
-    int iz = (int)((pos[2] - z0) / mesh->h[2]);
+    int ix = (int)floor((pos[0] - x0) / mesh->h[0]);
+    int iy = (int)floor((pos[1] - y0) / mesh->h[1]);
+    int iz = (int)floor((pos[2] - z0) / mesh->h[2]);
 
     /* Clamp to valid range */
     if (ix < 0 || ix >= nx || iy < 0 || iy >= ny || iz < 0 || iz >= nz)
@@ -137,17 +137,20 @@ int elems_for_mp(const Mesh *mesh, const MPMConfig *cfg,
     double x0 = cfg->x0, y0 = cfg->y0, z0 = cfg->z0;
 
     /* Compute element index ranges that overlap [pos-lp, pos+lp] */
-    int ix_lo = (int)((pos[0] - lp[0] - x0) / mesh->h[0]);
-    int ix_hi = (int)((pos[0] + lp[0] - x0) / mesh->h[0]);
-    int iy_lo = (int)((pos[1] - lp[1] - y0) / mesh->h[1]);
-    int iy_hi = (int)((pos[1] + lp[1] - y0) / mesh->h[1]);
-    int iz_lo = (int)((pos[2] - lp[2] - z0) / mesh->h[2]);
-    int iz_hi = (int)((pos[2] + lp[2] - z0) / mesh->h[2]);
+    int ix_lo = (int)floor((pos[0] - lp[0] - x0) / mesh->h[0]);
+    int ix_hi = (int)floor((pos[0] + lp[0] - x0) / mesh->h[0]);
+    int iy_lo = (int)floor((pos[1] - lp[1] - y0) / mesh->h[1]);
+    int iy_hi = (int)floor((pos[1] + lp[1] - y0) / mesh->h[1]);
+    int iz_lo = (int)floor((pos[2] - lp[2] - z0) / mesh->h[2]);
+    int iz_hi = (int)floor((pos[2] + lp[2] - z0) / mesh->h[2]);
 
     /* Clamp */
-    if (ix_lo < 0)  ix_lo = 0;  if (ix_hi >= nx) ix_hi = nx - 1;
-    if (iy_lo < 0)  iy_lo = 0;  if (iy_hi >= ny) iy_hi = ny - 1;
-    if (iz_lo < 0)  iz_lo = 0;  if (iz_hi >= nz) iz_hi = nz - 1;
+    if (ix_lo < 0) ix_lo = 0;
+    if (ix_hi >= nx) ix_hi = nx - 1;
+    if (iy_lo < 0) iy_lo = 0;
+    if (iy_hi >= ny) iy_hi = ny - 1;
+    if (iz_lo < 0) iz_lo = 0;
+    if (iz_hi >= nz) iz_hi = nz - 1;
 
     int count = 0;
     for (int iz = iz_lo; iz <= iz_hi && count < max_elems; iz++) {
